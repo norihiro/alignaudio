@@ -1,0 +1,13 @@
+.*.swp
+*~
+/Makefile.in
+/aclocal.m4
+/configure
+/compile
+/missing
+/install-sh
+/README
+/INSTALL
+/depcomp
+/autom4te.cache/
+/alignaudio-config.h.in
