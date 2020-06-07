@@ -17,6 +17,8 @@ struct alignaudio_config
 	int n_average_for_amplitude;
 	int n1_average_for_amplitude;
 	int n2_average_for_amplitude;
+
+	bool compensate_drift;
 };
 
 static void alignaudio_config_init(struct alignaudio_config *config)
@@ -34,6 +36,9 @@ static int parse_arguments(struct alignaudio_config *config, int argc, char **ar
 		if (*ai=='-') {
 			int c;
 			while ((c=*++ai)) switch (c) {
+				case 'c':
+					config->compensate_drift = 1;
+					break;
 				case 'o':
 					if (i+1 >= argc) {
 						fprintf(stderr, "Error: -o requires output file name.\n");
@@ -81,6 +86,7 @@ struct alignaudio
 
 	int cand_min, cand_max;
 	int center;
+	int center_drift1, center_drift2;
 };
 
 static inline int wave_comp_sz4(uint8_t *d, char *s) { return memcmp(d, s, 4); }
@@ -246,17 +252,111 @@ void calculate_by_amplitude(struct alignaudio *aa, struct alignaudio_config *con
 	free(env2);
 }
 
+void calculate_drift(struct alignaudio *aa, struct alignaudio_config *config)
+{
+	const int div = 4 * 2; // 48kHz stereo -> 12kHz mono
+	int n1 = aa->data1.raw_length / div;
+	int *d1 = malloc(sizeof(int) * n1);
+	for (int i=0, j=0, k=0, s=0; i<aa->data1.raw_length; i++) {
+		s += aa->data1.raw[i];
+		if (++k >= div) {
+			d1[j++] = s / div;
+			s = 0;
+			k = 0;
+		}
+	}
+	int n2 = aa->data2.raw_length / div;
+	int *d2 = malloc(sizeof(int) * n2);
+	for (int i=0, j=0, k=0, s=0; i<aa->data2.raw_length; i++) {
+		s += aa->data2.raw[i];
+		if (++k >= div) {
+			d2[j++] = s / div;
+			s = 0;
+			k = 0;
+		}
+	}
+
+	int offset_begin = aa->cand_min/div;
+	int offset_end = aa->cand_max/div;
+	int offset_c = (offset_begin+offset_end) / 2;
+	double s_xy=0, s_x=0, s_y=0, s_x2=0, s_y2=0, s_w=0;
+	const int n_blk = 65536;
+	// TODO: maybe this calculation is too fuzy.
+	// I should make 1s blocks for example, and find the optimum offset, then use least-square method.
+	for (int x=n_blk; x+n_blk<n1; x+=n_blk*32) {
+		long long w_max = 0;
+		int y = offset_c;
+		for (int k=offset_begin-offset_c; k<=offset_end-offset_c; k++) {
+			long long w = 0;
+			for (int i=x-n_blk/2; i<=x+n_blk/2; i++) {
+				int j = i - (k+offset_c);
+				if (j<0 || n2<=j) continue;
+
+				w += d1[i] * d2[j];
+			}
+
+			if (w<0) w = -w;
+			if (w > w_max) {
+				w_max = w;
+				y = k;
+			}
+		}
+		s_x += x;
+		s_y += y;
+		s_w += 1;
+		s_xy += x * y;
+		s_x2 += x * x;
+		s_y2 += y * y;
+	}
+
+	double a = (s_xy * s_w - s_x * s_y) / (s_w * s_x2 - s_x*s_x);
+	double b = (s_x2 * s_y - s_xy * s_x) / (s_w * s_x2 - s_x*s_x);
+
+	printf("calculate_drift detected %.2fppm drift (2nd audio has %s clock)\n", a*1e6, (a<0 ? "slower" : "faster"));
+	debug("calculate_drift a=%f b=%f s_w=%f\n", a, b, s_w);
+	debug("calculate_drift offset at begin %fs\n", (offset_c+b)*div / 96e3);
+	debug("calculate_drift offset at end %fs\n", ((offset_c+b)*div + a*aa->data1.raw_length) / 96e3);
+
+	aa->center = ((offset_c+b)*div);
+	aa->center &= ~1;
+	aa->center_drift1 = aa->data1.raw_length;
+	aa->center_drift2 = aa->data1.raw_length * (1.0+a);
+	printf("calculate_drift drift1=%d drift2=%d\n", aa->center_drift1, aa->center_drift2);
+	if (aa->center_drift1 > aa->center_drift2) debug("calculate_drift %d samples will be added.\n", aa->center_drift1-aa->center_drift2);
+	if (aa->center_drift1 < aa->center_drift2) debug("calculate_drift %d samples will be deleted.\n", aa->center_drift2-aa->center_drift1);
+
+	free(d1);
+	free(d2);
+}
+
 void overwrite_at_center(struct alignaudio *aa)
 {
 	int offset = aa->center;
 	offset &= ~1; // not to swap stereo channels
+	long long drift1 = aa->center_drift1;
+	long long drift2 = aa->center_drift2;
 	debug("overwrite_at_center offset=%d (%fs) cand was [%fs:%fs]\n", offset, offset/96e3, aa->cand_min/96e3, aa->cand_max/96e3);
+	int n_duplicate=0, n_skipped=0;
 
-	for (int i=0; i<aa->data1.raw_length; i++) {
-		int j = i - offset;
+	for (int i=0, j=-offset; i<aa->data1.raw_length;) {
+		if (j>=aa->data2.raw_length) break;
 		if (0<=j && j<aa->data2.raw_length)
 			aa->data1.raw[i] = aa->data2.raw[j];
+		// i*drift2 = j*drift1
+		if ((j+offset+1)*drift1 < i*drift2) {
+			j++;
+			n_skipped++;
+		}
+		else if ((i+1)*drift2 < (j+offset)*drift1) {
+			i++;
+			n_duplicate++;
+		}
+		else {
+			i ++;
+			j ++;
+		}
 	}
+	debug("overwrite_at_center n_skipped=%d n_duplicate=%d\n", n_skipped, n_duplicate);
 }
 
 int main(int argc, char **argv)
@@ -293,9 +393,12 @@ int main(int argc, char **argv)
 
 	// TODO: adjust drift of the clock period
 
-	overwrite_at_center(&aa);
+	if (config.compensate_drift) {
+		calculate_drift(&aa, &config);
+	}
 
 	if (config.file_out) {
+		overwrite_at_center(&aa);
 		write_wave(&aa.data1, config.file_out);
 	}
 
