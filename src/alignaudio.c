@@ -18,6 +18,8 @@ struct alignaudio_config
 	int n1_average_for_amplitude;
 	int n2_average_for_amplitude;
 
+	int n_samples_base_for_amplitude;
+
 	bool compensate_drift;
 };
 
@@ -27,6 +29,7 @@ static void alignaudio_config_init(struct alignaudio_config *config)
 	config->n_average_for_amplitude = 65536;
 	config->n1_average_for_amplitude = 4096;
 	config->n2_average_for_amplitude = 256;
+	config->n_samples_base_for_amplitude = 48000 * 2 * 60; // 1 minutes
 }
 
 static int parse_arguments(struct alignaudio_config *config, int argc, char **argv)
@@ -225,7 +228,35 @@ void calculate_by_amplitude(struct alignaudio *aa, struct alignaudio_config *con
 		rr[n_rr].offset = offset;
 		rr[n_rr].sp = sp;
 		n_rr++;
+	}
 
+	if (config->n_samples_base_for_amplitude > 0) {
+		uint64_t sp_sum = 0;
+		int i0 = 0, i1 = 0;
+		int m = config->n_samples_base_for_amplitude / config->n_average_for_amplitude;
+
+		sp_max = 0;
+
+		while (i1<n_rr && i1-i0<m)
+			sp_sum += rr[i1++].sp;
+
+		for (int i=1; i+1<n_rr; i++) {
+			if (i1<n_rr && (i1-i)*2<m)
+				sp_sum += rr[i1++].sp;
+
+			if (i1-i0 > m)
+				sp_sum -= rr[i0++].sp;
+
+			int64_t sp_avg = sp_sum / (i1-i0);
+			int64_t sp = (int64_t)rr[i].sp - sp_avg;
+
+			if (sp > 0 && sp > sp_max) {
+				d0 = rr[i].sp - rr[i-1].sp;
+				d1 = rr[i].sp - rr[i+1].sp;
+				offset_ret = rr[i].offset;
+				sp_max = sp;
+			}
+		}
 	}
 
 	// for debug
@@ -385,6 +416,7 @@ int main(int argc, char **argv)
 	aa.cand_max =  (int)aa.data1.raw_length;
 	calculate_by_amplitude(&aa, &config);
 
+	config.n_samples_base_for_amplitude = 0;
 	config.n_average_for_amplitude = config.n1_average_for_amplitude;
 	calculate_by_amplitude(&aa, &config);
 
