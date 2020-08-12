@@ -369,22 +369,24 @@ void overwrite_at_center(struct alignaudio *aa)
 	debug("overwrite_at_center offset=%d (%fs) cand was [%fs:%fs]\n", offset, offset/96e3, aa->cand_min/96e3, aa->cand_max/96e3);
 	int n_duplicate=0, n_skipped=0;
 
-	for (int i=0, j=-offset; i<aa->data1.raw_length;) {
-		if (j>=aa->data2.raw_length) break;
-		if (0<=j && j<aa->data2.raw_length)
-			aa->data1.raw[i] = aa->data2.raw[j];
+	for (int i=0, j=-offset; i+1<aa->data1.raw_length && (j<0 || j+1<aa->data2.raw_length);) {
+		if (0<=j) {
+			aa->data1.raw[i+0] = aa->data2.raw[j+0];
+			aa->data1.raw[i+1] = aa->data2.raw[j+1];
+		}
+
 		// i*drift2 = j*drift1
-		if ((j+offset+1)*drift1 < i*drift2) {
-			j++;
+		if ((j+offset+2)*drift1 < i*drift2) {
+			j += 2;
 			n_skipped++;
 		}
-		else if ((i+1)*drift2 < (j+offset)*drift1) {
-			i++;
+		else if ((i+2)*drift2 < (j+offset)*drift1) {
+			i += 2;
 			n_duplicate++;
 		}
 		else {
-			i ++;
-			j ++;
+			i += 2;
+			j += 2;
 		}
 	}
 	debug("overwrite_at_center n_skipped=%d n_duplicate=%d\n", n_skipped, n_duplicate);
