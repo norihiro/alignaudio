@@ -1,0 +1,31 @@
+name: C/C++ CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: autogen
+      run: ./autogen.sh
+    - name: build directory
+      run: mkdir build && cd build
+    - name: configure
+      working-directory: ./build
+      run: ../configure
+    - name: make
+      working-directory: ./build
+      run: make
+    - name: make check
+      working-directory: ./build
+      run: make check
+    - name: make distcheck
+      working-directory: ./build
+      run: make distcheck
